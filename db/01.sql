@@ -39,7 +39,7 @@ DELIMITER ;
 -- ==========================
 CREATE TABLE IF NOT EXISTS chats (
     id INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
-    nome VARCHAR(100),
+    nome VARCHAR(100) UNIQUE,
     tipo ENUM('public','dm') NOT NULL DEFAULT 'public',
     criado_por INT UNSIGNED NOT NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,

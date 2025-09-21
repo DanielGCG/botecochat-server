@@ -123,23 +123,28 @@ UsersRouter.post('/login', async (req, res) => {
     }
 });
 
-// Logout (pode ser público)
-UsersRouter.post('/logout', async (req, res) => {
+// ==================== Rotas protegidas ====================
+
+// Logout
+UsersRouter.post('/logout', protect(0)(async (req, res) => {
     const cookieValue = req.cookies?.['session'];
-    if (cookieValue) {
-        try {
-            const connection = await pool.getConnection();
-            await connection.execute("DELETE FROM user_sessions WHERE cookie_value = ?", [cookieValue]);
-            connection.release();
-        } catch (err) {
-            console.error(err);
-        }
+    if (!cookieValue) {
+        return res.status(400).json({ message: "Sessão não encontrada" });
+    }
+    try {
+        const connection = await pool.getConnection();
+        // Garante que só apaga a sessão do usuário autenticado
+        await connection.execute(
+            "DELETE FROM user_sessions WHERE cookie_value = ? AND user_id = ?",
+            [cookieValue, req.user.id]
+        );
+        connection.release();
+    } catch (err) {
+        console.error(err);
     }
     res.clearCookie('session');
     res.json({ message: "Logout realizado com sucesso" });
-});
-
-// ==================== Rotas protegidas ====================
+}));
 
 // Perfil próprio
 UsersRouter.get('/me', protect(0)(async (req, res) => {
@@ -206,6 +211,50 @@ UsersRouter.put('/me', protect(0)(async (req, res) => {
     }
 }));
 
+// Atualizar senha do próprio usuário
+UsersRouter.put('/me/password', protect(0)(async (req, res) => {
+  const { currentPassword, newPassword } = req.body;
+
+  if(!currentPassword || !newPassword){
+    return res.status(400).json({ message: "Senha atual e nova são obrigatórias" });
+  }
+
+  try {
+    const connection = await pool.getConnection();
+    const [rows] = await connection.execute(
+      "SELECT password_hash FROM users WHERE id = ?",
+      [req.user.id]
+    );
+
+    if(rows.length === 0){
+      connection.release();
+      return res.status(404).json({ message: "Usuário não encontrado" });
+    }
+
+    const valid = await bcrypt.compare(currentPassword, rows[0].password_hash);
+    if(!valid){
+      connection.release();
+      return res.status(401).json({ message: "Senha atual incorreta" });
+    }
+
+    const hash = await bcrypt.hash(newPassword, 10);
+    await connection.execute(
+      "UPDATE users SET password_hash = ? WHERE id = ?",
+      [hash, req.user.id]
+    );
+
+    connection.release();
+    res.json({ message: "Senha atualizada com sucesso" });
+  } catch(err){
+    console.error(err);
+    res.status(500).json({ message: "Erro ao atualizar senha" });
+  }
+}));
+
+
+// ==================== Rotas de admin ====================
+
+
 // Listar todos usuários (admin)
 UsersRouter.get('/', protect(1)(async (req, res) => {
     try {
@@ -261,46 +310,6 @@ UsersRouter.put('/:id', protect(1)(async (req, res) => {
     }
 }));
 
-// Atualizar senha do próprio usuário
-UsersRouter.put('/me/password', protect(0), async (req, res) => {
-  const { currentPassword, newPassword } = req.body;
-
-  if(!currentPassword || !newPassword){
-    return res.status(400).json({ message: "Senha atual e nova são obrigatórias" });
-  }
-
-  try {
-    const connection = await pool.getConnection();
-    const [rows] = await connection.execute(
-      "SELECT password_hash FROM users WHERE id = ?",
-      [req.user.id]
-    );
-
-    if(rows.length === 0){
-      connection.release();
-      return res.status(404).json({ message: "Usuário não encontrado" });
-    }
-
-    const valid = await bcrypt.compare(currentPassword, rows[0].password_hash);
-    if(!valid){
-      connection.release();
-      return res.status(401).json({ message: "Senha atual incorreta" });
-    }
-
-    const hash = await bcrypt.hash(newPassword, 10);
-    await connection.execute(
-      "UPDATE users SET password_hash = ? WHERE id = ?",
-      [hash, req.user.id]
-    );
-
-    connection.release();
-    res.json({ message: "Senha atualizada com sucesso" });
-  } catch(err){
-    console.error(err);
-    res.status(500).json({ message: "Erro ao atualizar senha" });
-  }
-});
-
 // Criar usuário (admin)
 UsersRouter.post('/', protect(1)(async (req, res) => {
     const { username, password, role = 0 } = req.body;
@@ -332,7 +341,7 @@ UsersRouter.delete('/:id', protect(1)(async (req, res) => {
     }
 }));
 
-// ==================== Reset de senha ====================
+// Reset de senha para 12345 (admin)
 UsersRouter.put('/:id/reset-password', protect(1)(async (req, res) => {
     const userId = req.params.id;
 
