@@ -268,10 +268,21 @@ ChatsRouter.get('/', protect(0)(async (req, res) => {
 ChatsRouter.get('/users', protect(0)(async (req, res) => {
     try {
         const connection = await pool.getConnection();
+        console.log('ID do usuário logado:', req.user.id);
         const [users] = await connection.execute(
-            `SELECT id, username FROM users WHERE id != ?`,
-            [req.user.id]
+            `SELECT u.id, u.username
+             FROM users u
+             WHERE u.id != ?
+             AND u.id NOT IN (
+                 SELECT cp2.user_id
+                 FROM chats c
+                 JOIN chat_participants cp1 ON c.id = cp1.chat_id AND cp1.user_id = ?
+                 JOIN chat_participants cp2 ON c.id = cp2.chat_id AND cp2.user_id != ?
+                 WHERE c.tipo = 'dm'
+             )`,
+            [req.user.id, req.user.id, req.user.id]
         );
+        console.log('Usuários retornados:', users);
         connection.release();
         res.json(users);
     } catch (err) {
