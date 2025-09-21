@@ -126,14 +126,15 @@ UsersRouter.post('/login', async (req, res) => {
 // ==================== Rotas protegidas ====================
 
 // Logout
-UsersRouter.post('/logout', protect(0)(async (req, res) => {
+UsersRouter.post('/logout', async (req, res) => {
     const cookieValue = req.cookies?.['session'];
-    if (!cookieValue) {
-        return res.status(400).json({ message: "Sessão não encontrada" });
+    // Sempre limpa o cookie e responde sucesso, mesmo se não houver usuário autenticado
+    if (!cookieValue || !req.user || !req.user.id) {
+        res.clearCookie('session');
+        return res.json({ message: "Logout realizado com sucesso" });
     }
     try {
         const connection = await pool.getConnection();
-        // Garante que só apaga a sessão do usuário autenticado
         await connection.execute(
             "DELETE FROM user_sessions WHERE cookie_value = ? AND user_id = ?",
             [cookieValue, req.user.id]
@@ -144,7 +145,7 @@ UsersRouter.post('/logout', protect(0)(async (req, res) => {
     }
     res.clearCookie('session');
     res.json({ message: "Logout realizado com sucesso" });
-}));
+});
 
 // Perfil próprio
 UsersRouter.get('/me', protect(0)(async (req, res) => {
