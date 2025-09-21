@@ -19,19 +19,16 @@ const sessionMiddleware = session({
     saveUninitialized: false,
     cookie: {
         httpOnly: true,
-        sameSite: 'lax',   // 'lax' permite teste sem HTTPS
-        secure: false,      // HTTPS não é necessário
-        maxAge: 1000 * 60 * 60 * 24 // 1 dia
+        secure: true,
+        sameSite: 'none',
+        maxAge: 1000 * 60 * 60 * 24
     }
 });
 
 // ==================== Middlewares ====================
 // CORS liberado para qualquer IP na rede local
 app.use(cors({
-    origin: (origin, callback) => {
-        // Permite qualquer IP da rede local
-        callback(null, true);
-    },
+    origin: (origin, callback) => callback(null, true), // qualquer origem
     credentials: true,
     methods: ['GET','POST','PUT','DELETE','OPTIONS'],
     allowedHeaders: ['Content-Type','Authorization']
@@ -43,6 +40,7 @@ app.use(express.json());
 
 app.set('view engine', 'ejs');
 app.set('views', path.join(__dirname, 'views'));
+app.set('trust proxy', 1); 
 app.use(express.static(path.join(__dirname, 'public')));
 
 // Rotas
@@ -53,9 +51,9 @@ app.use('/chats', require('./server/api/chats'));
 const httpServer = http.createServer(app);
 const io = new Server(httpServer, {
     cors: {
-        origin: (origin, callback) => callback(null, true), // qualquer IP
-        credentials: true,
-        methods: ['GET','POST']
+        origin: (origin, callback) => callback(null, true), // qualquer origem
+        methods: ['GET','POST'],
+        credentials: true
     }
 });
 
@@ -72,15 +70,6 @@ io.use((socket, next) => {
     socket.userId = socket.request.user.id;
     next();
 });
-
-// ==================== Helpers ====================
-async function verifyChatAccess(connection, chatId, userId) {
-    const [rows] = await connection.execute(
-        `SELECT 1 FROM chat_participants WHERE chat_id = ? AND user_id = ?`,
-        [chatId, userId]
-    );
-    return rows.length > 0;
-}
 
 // ==================== Helpers ====================
 async function verifyChatAccess(connection, chatId, userId) {
