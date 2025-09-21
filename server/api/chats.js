@@ -8,7 +8,7 @@ const protect = (minRole = 0) => (handler) => {
     return (req, res, next) => authMiddleware(minRole)(req, res, () => handler(req, res, next));
 };
 
-// ==================== Funções auxiliares ====================
+// ==================== Auxiliares ====================
 
 // Verifica se o usuário tem acesso ao chat (ID ou nome)
 async function verifyChatAccess(connection, chatIdentifier, userId) {
@@ -56,45 +56,41 @@ ChatsRouter.get('/:chatIdentifier/messages', protect(0)(async (req, res) => {
     try {
         const connection = await pool.getConnection();
 
-        // Verifica se o usuário tem acesso ao chat
-        const canAccess = await verifyChatAccess(connection, chatIdentifier, req.user.id);
-        if (!canAccess) {
-            connection.release();
-            return res.status(403).json({ message: "Você não pode acessar este chat" });
-        }
-
-        // Obtém o ID do chat
+        // Obtém ID do chat
         let chatId;
         if (isNaN(chatIdentifier)) {
-            const [chatRows] = await connection.execute(`SELECT id FROM chats WHERE nome = ?`, [chatIdentifier]);
+            const [chatRows] = await connection.execute(
+                `SELECT id FROM chats WHERE nome = ?`,
+                [chatIdentifier]
+            );
             if (chatRows.length === 0) {
                 connection.release();
                 return res.status(404).json({ message: "Chat não encontrado" });
             }
             chatId = chatRows[0].id;
         } else {
-            chatId = chatIdentifier;
+            chatId = parseInt(chatIdentifier, 10);
         }
 
-        // Busca mensagens
+        // Verifica acesso
+        const canAccess = await verifyChatAccess(connection, chatId, req.user.id);
+        if (!canAccess) {
+            connection.release();
+            return res.status(403).json({ message: "Você não pode acessar este chat" });
+        }
+
+        console.log(`${chatId}, ${limit}, ${offset}`);
+
+        // Busca mensagens (LIMIT e OFFSET via template literal)
         const [messages] = await connection.execute(
             `SELECT cm.id, cm.user_id, u.username, cm.mensagem, cm.created_at
              FROM chat_messages cm
              JOIN users u ON cm.user_id = u.id
              WHERE cm.chat_id = ?
-             ORDER BY cm.created_at DESC
-             LIMIT ? OFFSET ?`,
-            [chatId, limit, offset]
+             ORDER BY cm.created_at ASC
+             LIMIT ${limit} OFFSET ${offset}`,
+            [chatId]
         );
-
-        // Formata mensagens
-        const formattedMessages = messages.map(m => ({
-            id: m.id,
-            username: m.username,
-            mensagem: m.mensagem,
-            isMine: m.user_id === req.user.id,
-            created_at: m.created_at
-        }));
 
         // Atualiza last_read_message_id para o usuário
         if (messages.length > 0) {
@@ -107,20 +103,17 @@ ChatsRouter.get('/:chatIdentifier/messages', protect(0)(async (req, res) => {
             );
         }
 
-        // Obtém last_read_message_id do outro participante (para DMs)
-        const [readRows] = await connection.execute(
-            `SELECT last_read_message_id FROM chat_reads WHERE chat_id = ? AND user_id = ?`,
-            [chatId, req.user.id]
-        );
-        const lastReadMessageId = readRows.length ? readRows[0].last_read_message_id : 0;
-
         connection.release();
 
-        // Retorna mensagens + lastReadMessageId
         res.json({
             page,
-            messages: formattedMessages.reverse(),
-            lastReadMessageId
+            messages: messages.map(m => ({
+                id: m.id,
+                username: m.username,
+                mensagem: m.mensagem,
+                isMine: m.user_id === req.user.id,
+                createdAt: m.created_at
+            }))
         });
 
     } catch (err) {
@@ -140,6 +133,7 @@ ChatsRouter.post('/:chatIdentifier/messages', protect(0)(async (req, res) => {
     try {
         const connection = await pool.getConnection();
 
+        // Obtém ID do chat
         let chatId;
         if (isNaN(chatIdentifier)) {
             const [chatRows] = await connection.execute(`SELECT id FROM chats WHERE nome = ?`, [chatIdentifier]);
@@ -152,17 +146,20 @@ ChatsRouter.post('/:chatIdentifier/messages', protect(0)(async (req, res) => {
             chatId = chatIdentifier;
         }
 
+        // Verifica acesso
         const canAccess = await verifyChatAccess(connection, chatId, req.user.id);
         if (!canAccess) {
             connection.release();
             return res.status(403).json({ message: "Você não pode enviar mensagens para este chat" });
         }
 
+        // Insere mensagem
         const [result] = await connection.execute(
             `INSERT INTO chat_messages (chat_id, user_id, mensagem) VALUES (?, ?, ?)`,
             [chatId, req.user.id, mensagem]
         );
 
+        // Busca mensagem recém-criada
         const [rows] = await connection.execute(
             `SELECT cm.id, cm.mensagem, u.username, cm.user_id, cm.created_at
              FROM chat_messages cm 
@@ -171,15 +168,22 @@ ChatsRouter.post('/:chatIdentifier/messages', protect(0)(async (req, res) => {
             [result.insertId]
         );
 
+        // Atualiza last_read_message_id do remetente
+        await connection.execute(
+            `INSERT INTO chat_reads (chat_id, user_id, last_read_message_id)
+             VALUES (?, ?, ?)
+             ON DUPLICATE KEY UPDATE last_read_message_id = ?`,
+            [chatId, req.user.id, rows[0].id, rows[0].id]
+        );
+
         connection.release();
 
         res.json({
             id: rows[0].id,
             mensagem: rows[0].mensagem,
             username: rows[0].username,
-            isMine: rows[0].user_id === req.user.id,
-            createdAt: rows[0].created_at,
-            seen: false
+            isMine: true,
+            createdAt: rows[0].created_at
         });
 
     } catch (err) {
@@ -188,82 +192,141 @@ ChatsRouter.post('/:chatIdentifier/messages', protect(0)(async (req, res) => {
     }
 }));
 
-// ==================== Criação de chats & DMs ====================
-
-// POST /chats/public
-ChatsRouter.post('/public', protect(0)(async (req, res) => {
-    const { nome } = req.body;
-    if (!nome || nome.trim() === '') return res.status(400).json({ message: "Nome do chat é obrigatório" });
-
+// ---------------- Lista todas as DMs do usuário ----------------
+ChatsRouter.get('/', protect(0)(async (req, res) => {
     try {
         const connection = await pool.getConnection();
-        const [result] = await connection.execute(
-            `INSERT INTO chats (nome, tipo, criado_por) VALUES (?, 'public', ?)`,
-            [nome.trim(), req.user.id]
-        );
-        const chatId = result.insertId;
 
-        await connection.execute(
-            `INSERT INTO chat_participants (chat_id, user_id) VALUES (?, ?)`,
-            [chatId, req.user.id]
+        // Busca chats do usuário
+        const [chats] = await connection.execute(
+            `SELECT c.id, c.nome, c.tipo
+             FROM chats c
+             JOIN chat_participants cp ON c.id = cp.chat_id
+             WHERE cp.user_id = ?`,
+            [req.user.id]
         );
+
+        const chatList = [];
+
+        for (const chat of chats) {
+            // Participantes do chat
+            const [participants] = await connection.execute(
+                `SELECT u.id, u.username
+                 FROM chat_participants cp
+                 JOIN users u ON cp.user_id = u.id
+                 WHERE cp.chat_id = ?`,
+                [chat.id]
+            );
+
+            const participantsInfo = participants.map(p => ({
+                id: p.id,
+                username: p.username,
+                isMine: p.id === req.user.id
+            }));
+
+            // Última mensagem
+            const [lastMsgRows] = await connection.execute(
+                `SELECT mensagem, created_at FROM chat_messages
+                 WHERE chat_id = ?
+                 ORDER BY created_at DESC LIMIT 1`,
+                [chat.id]
+            );
+
+            const lastMessage = lastMsgRows[0]?.mensagem || null;
+            const lastMessageAt = lastMsgRows[0]?.created_at || null;
+
+            // Contagem não lidas
+            const [unreadRows] = await connection.execute(
+                `SELECT COUNT(*) AS unreadCount
+                 FROM chat_messages cm
+                 LEFT JOIN chat_reads cr ON cm.id = cr.last_read_message_id AND cr.user_id = ?
+                 WHERE cm.chat_id = ? AND (cr.last_read_message_id IS NULL OR cm.id > cr.last_read_message_id)`,
+                [req.user.id, chat.id]
+            );
+
+            chatList.push({
+                id: chat.id,
+                nome: chat.nome,
+                tipo: chat.tipo,
+                participants: participantsInfo,
+                lastMessage,
+                lastMessageAt,
+                unreadCount: unreadRows[0].unreadCount
+            });
+        }
 
         connection.release();
-        res.status(201).json({ message: "Chat público criado", chatId });
+        res.json(chatList);
+
     } catch (err) {
         console.error(err);
-        res.status(500).json({ message: "Erro ao criar chat público" });
+        res.status(500).json({ message: "Erro ao carregar chats" });
     }
 }));
 
-// POST /chats/dm
+// ---------------- Lista todos os usuários disponíveis ----------------
+ChatsRouter.get('/users', protect(0)(async (req, res) => {
+    try {
+        const connection = await pool.getConnection();
+        const [users] = await connection.execute(
+            `SELECT id, username FROM users WHERE id != ?`,
+            [req.user.id]
+        );
+        connection.release();
+        res.json(users);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: "Erro ao carregar usuários" });
+    }
+}));
+
+// ---------------- Criar uma nova DM ----------------
 ChatsRouter.post('/dm', protect(0)(async (req, res) => {
     const { username } = req.body;
-    const creatorId = req.user.id;
-
-    if (!username) return res.status(400).json({ message: "Username do outro usuário é obrigatório" });
+    if (!username) return res.status(400).json({ message: "Informe o username do outro usuário" });
 
     try {
         const connection = await pool.getConnection();
-        const otherUserId = await getUserIdByUsername(connection, username);
 
-        if (!otherUserId) {
+        // ID do usuário destinatário
+        const [users] = await connection.execute(
+            `SELECT id FROM users WHERE username = ?`,
+            [username]
+        );
+        if (!users.length) {
             connection.release();
             return res.status(404).json({ message: "Usuário não encontrado" });
         }
+        const otherUserId = users[0].id;
 
-        if (creatorId === otherUserId) {
-            connection.release();
-            return res.status(400).json({ message: "Não é possível criar DM consigo mesmo" });
-        }
-
-        const [existing] = await connection.execute(
-            `SELECT c.id
-             FROM chats c
-             JOIN chat_participants cp1 ON c.id = cp1.chat_id
-             JOIN chat_participants cp2 ON c.id = cp2.chat_id
-             WHERE c.tipo = 'dm' AND cp1.user_id = ? AND cp2.user_id = ?`,
-            [creatorId, otherUserId]
+        // Verifica se já existe DM entre os dois
+        const [existingChats] = await connection.execute(
+            `SELECT c.id FROM chats c
+             JOIN chat_participants cp1 ON c.id = cp1.chat_id AND cp1.user_id = ?
+             JOIN chat_participants cp2 ON c.id = cp2.chat_id AND cp2.user_id = ?
+             WHERE c.tipo = 'dm'`,
+            [req.user.id, otherUserId]
         );
 
-        if (existing.length > 0) {
+        if (existingChats.length > 0) {
             connection.release();
-            return res.status(409).json({ message: "DM já existe", chatId: existing[0].id });
+            return res.status(409).json({ message: "DM já existe", chatId: existingChats[0].id });
         }
 
+        // Cria novo chat DM
         const [result] = await connection.execute(
-            `INSERT INTO chats (tipo, criado_por, nome) VALUES ('dm', ?, NULL)`,
-            [creatorId]
+            `INSERT INTO chats (tipo) VALUES ('dm')`
         );
         const chatId = result.insertId;
 
+        // Insere participantes
         await connection.execute(
             `INSERT INTO chat_participants (chat_id, user_id) VALUES (?, ?), (?, ?)`,
-            [chatId, creatorId, chatId, otherUserId]
+            [chatId, req.user.id, chatId, otherUserId]
         );
 
         connection.release();
-        res.status(201).json({ message: "DM criada com sucesso", chatId });
+        res.status(201).json({ message: "DM criada", chatId });
 
     } catch (err) {
         console.error(err);
@@ -271,98 +334,5 @@ ChatsRouter.post('/dm', protect(0)(async (req, res) => {
     }
 }));
 
-// ==================== Listagem de chats ====================
-
-// GET /chats
-ChatsRouter.get('/', protect(0)(async (req, res) => {
-    try {
-        const connection = await pool.getConnection();
-
-        const [chats] = await connection.execute(
-            `SELECT c.id, c.nome, c.tipo, c.criado_por, c.created_at,
-                cm.id AS lastMessageId,
-                cm.mensagem AS lastMessage, cm.created_at AS lastMessageAt,
-                u.username AS lastMessageUser
-            FROM chats c
-            LEFT JOIN chat_messages cm ON cm.id = (
-                SELECT cm2.id
-                FROM chat_messages cm2
-                WHERE cm2.chat_id = c.id
-                ORDER BY cm2.created_at DESC
-                LIMIT 1
-            )
-            LEFT JOIN users u ON cm.user_id = u.id
-            WHERE 
-                c.tipo = 'public'
-                OR (c.tipo = 'dm' AND c.id IN (
-                    SELECT chat_id FROM chat_participants WHERE user_id = ?
-                ))
-            ORDER BY lastMessageAt DESC, c.created_at DESC`,
-            [req.user.id]
-        );
-
-        for (const chat of chats) {
-            const [participants] = await connection.execute(
-                `SELECT u.username, u.id FROM chat_participants cp
-                 JOIN users u ON cp.user_id = u.id
-                 WHERE cp.chat_id = ?`,
-                [chat.id]
-            );
-            chat.participants = participants.map(p => ({
-                username: p.username,
-                isMine: p.id === req.user.id
-            }));
-
-            const [unread] = await connection.execute(
-                `SELECT COUNT(*) AS unreadCount
-                 FROM chat_messages cm
-                 LEFT JOIN chat_reads cr ON cr.chat_id = cm.chat_id AND cr.user_id = ?
-                 WHERE cm.chat_id = ? AND (cr.last_read_message_id IS NULL OR cm.id > cr.last_read_message_id)`,
-                [req.user.id, chat.id]
-            );
-            chat.unreadCount = unread[0].unreadCount;
-        }
-
-        connection.release();
-        res.json(chats);
-
-    } catch (err) {
-        console.error(err);
-        res.status(500).json({ message: "Erro ao listar chats" });
-    }
-}));
-
-// GET /chats/users
-ChatsRouter.get('/users', protect(0)(async (req, res) => {
-    const userId = req.user.id;
-    try {
-        const connection = await pool.getConnection();
-
-        const [users] = await connection.execute(
-            `SELECT u.username
-             FROM users u
-             WHERE u.id != ?
-               AND u.id NOT IN (
-                   SELECT CASE 
-                       WHEN cp1.user_id = ? THEN cp2.user_id
-                       ELSE cp1.user_id
-                   END AS other_user_id
-                   FROM chat_participants cp1
-                   JOIN chat_participants cp2 ON cp1.chat_id = cp2.chat_id
-                   JOIN chats c ON cp1.chat_id = c.id
-                   WHERE c.tipo = 'dm' AND (cp1.user_id = ? OR cp2.user_id = ?)
-               )
-             ORDER BY u.username`,
-            [userId, userId, userId, userId]
-        );
-
-        connection.release();
-        res.json(users.map(u => ({ username: u.username })));
-
-    } catch (err) {
-        console.error(err);
-        res.status(500).json({ message: "Erro ao listar usuários" });
-    }
-}));
 
 module.exports = ChatsRouter;
