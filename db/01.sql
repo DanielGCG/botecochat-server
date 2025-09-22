@@ -82,3 +82,57 @@ CREATE TABLE IF NOT EXISTS chat_reads (
 -- 2. Chats públicos: qualquer usuário pode ser adicionado à tabela
 --    'chat_participants' normalmente.
 -- 3. Cada usuário só pode aparecer uma vez por chat devido ao PRIMARY KEY.
+
+
+-- ==========================
+-- TABELAS DE CARTINHAS
+-- ==========================
+
+-- Tabela principal de cartinhas
+CREATE TABLE IF NOT EXISTS cartinhas (
+    id INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    remetente_id INT UNSIGNED NOT NULL COMMENT 'Quem enviou a cartinha',
+    destinatario_id INT UNSIGNED NOT NULL COMMENT 'Quem recebeu a cartinha',
+    titulo VARCHAR(40) NOT NULL COMMENT 'Máximo 40 caracteres',
+    conteudo VARCHAR(560) NOT NULL COMMENT 'Máximo 560 caracteres',
+    data_envio TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    data_lida TIMESTAMP NULL COMMENT 'Quando foi marcada como lida',
+    lida BOOLEAN NOT NULL DEFAULT FALSE,
+    favoritada BOOLEAN NOT NULL DEFAULT FALSE,
+    data_favoritada TIMESTAMP NULL COMMENT 'Quando foi favoritada',
+    
+    FOREIGN KEY (remetente_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (destinatario_id) REFERENCES users(id) ON DELETE CASCADE,
+    
+    -- Índices essenciais
+    INDEX idx_destinatario_lida (destinatario_id, lida),
+    INDEX idx_destinatario_favoritada (destinatario_id, favoritada)
+);
+
+-- ==========================
+-- TRIGGER SIMPLES
+-- ==========================
+
+-- Trigger para atualizar data_lida quando marcar como lida
+DELIMITER //
+CREATE TRIGGER cartinha_lida_update
+BEFORE UPDATE ON cartinhas
+FOR EACH ROW
+BEGIN
+    -- Se está marcando como lida pela primeira vez
+    IF OLD.lida = FALSE AND NEW.lida = TRUE AND OLD.data_lida IS NULL THEN
+        SET NEW.data_lida = CURRENT_TIMESTAMP;
+    END IF;
+    
+    -- Se está favoritando pela primeira vez
+    IF OLD.favoritada = FALSE AND NEW.favoritada = TRUE AND OLD.data_favoritada IS NULL THEN
+        SET NEW.data_favoritada = CURRENT_TIMESTAMP;
+    END IF;
+    
+    -- Se está desfavoritando
+    IF OLD.favoritada = TRUE AND NEW.favoritada = FALSE THEN
+        SET NEW.data_favoritada = NULL;
+    END IF;
+END;
+//
+DELIMITER ;

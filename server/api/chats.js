@@ -8,7 +8,7 @@ const protect = (minRole = 0) => (handler) => {
     return (req, res, next) => authMiddleware(minRole)(req, res, () => handler(req, res, next));
 };
 
-// ==================== Auxiliares ====================
+// ==================== Funções Auxiliares ====================
 
 // Verifica se o usuário tem acesso ao chat (ID ou nome)
 async function verifyChatAccess(connection, chatIdentifier, userId) {
@@ -44,7 +44,7 @@ async function getUserIdByUsername(connection, username) {
     return rows[0].id;
 }
 
-// ==================== Mensagens ====================
+// ==================== Endpoints de Mensagens ====================
 
 // GET /chats/:chatIdentifier/messages?page=1
 ChatsRouter.get('/:chatIdentifier/messages', protect(0)(async (req, res) => {
@@ -78,8 +78,6 @@ ChatsRouter.get('/:chatIdentifier/messages', protect(0)(async (req, res) => {
             connection.release();
             return res.status(403).json({ message: "Você não pode acessar este chat" });
         }
-
-        console.log(`${chatId}, ${limit}, ${offset}`);
 
         // Busca mensagens (LIMIT e OFFSET via template literal)
         const [messages] = await connection.execute(
@@ -192,7 +190,9 @@ ChatsRouter.post('/:chatIdentifier/messages', protect(0)(async (req, res) => {
     }
 }));
 
-// ---------------- Lista todas as DMs do usuário ----------------
+// ==================== Endpoints de Gerenciamento de Chats ====================
+
+// GET /chats - Lista todas as DMs do usuário
 ChatsRouter.get('/', protect(0)(async (req, res) => {
     try {
         const connection = await pool.getConnection();
@@ -264,7 +264,7 @@ ChatsRouter.get('/', protect(0)(async (req, res) => {
     }
 }));
 
-// ---------------- Lista todos os usuários disponíveis ----------------
+// GET /chats/users - Lista todos os usuários disponíveis para DM
 ChatsRouter.get('/users', protect(0)(async (req, res) => {
     try {
         const connection = await pool.getConnection();
@@ -298,7 +298,7 @@ ChatsRouter.get('/users', protect(0)(async (req, res) => {
     }
 }));
 
-// ---------------- Criar uma nova DM ----------------
+// POST /chats/dm - Criar uma nova DM
 ChatsRouter.post('/dm', protect(0)(async (req, res) => {
     const { username } = req.body;
     if (!username) return res.status(400).json({ message: "Informe o username do outro usuário" });
