@@ -252,4 +252,62 @@ UsersRouter.put('/me/password', protect(0)(async (req, res) => {
   }
 }));
 
+// GET /users/buscar - Buscar usuários por nome
+UsersRouter.get('/buscar', protect(0)(async (req, res) => {
+    const q = req.query.q || '';
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const offset = (page - 1) * limit;
+
+    try {
+        const connection = await pool.getConnection();
+        
+        const searchTerm = `%${q.toLowerCase()}%`;
+
+        // Interpolando LIMIT e OFFSET diretamente
+        const sqlQuery = `
+            SELECT 
+                id, 
+                username, 
+                profile_image as avatar,
+                CASE 
+                    WHEN TIMESTAMPDIFF(MINUTE, last_access, NOW()) < 5 THEN 'online'
+                    WHEN TIMESTAMPDIFF(HOUR, last_access, NOW()) < 1 THEN 'ausente'
+                    ELSE 'offline'
+                END as status
+            FROM users
+            WHERE LOWER(username) LIKE ? AND id != ?
+            ORDER BY 
+                CASE WHEN LOWER(username) = ? THEN 0
+                     WHEN LOWER(username) LIKE ? THEN 1
+                     ELSE 2
+                END,
+                username
+            LIMIT ${limit} OFFSET ${offset}
+        `;
+
+        const [usuarios] = await connection.execute(sqlQuery, [searchTerm, req.user.id, q.toLowerCase(), `${q.toLowerCase()}%`]);
+
+        // Contagem total para paginação
+        const [countResult] = await connection.execute(`
+            SELECT COUNT(*) as total
+            FROM users
+            WHERE LOWER(username) LIKE ? AND id != ?
+        `, [searchTerm, req.user.id]);
+
+        const totalItems = countResult[0].total;
+        const totalPages = Math.ceil(totalItems / limit);
+
+        connection.release();
+        res.json({
+            usuarios,
+            currentPage: page,
+            totalPages,
+            totalItems
+        });
+    } catch (err) {
+        res.status(500).json({ message: "Erro ao buscar usuários" });
+    }
+}));
+
 module.exports = UsersRouter;

@@ -339,20 +339,53 @@ Envia uma mensagem para um chat.
 Sistema de cartas/bilhetes entre usuários. Todas as rotas requerem autenticação.
 
 #### **GET** `/api/cartinhas/recebidas`
-Lista cartinhas não lidas recebidas.
+Lista cartinhas recebidas, agrupadas por remetente.
+
+**Observações:**
+- Inclui cartinhas não lidas
+- Inclui cartinhas lidas recentes (últimos 3 dias)
+- Organizadas por remetente para melhor visualização
 
 **Response (200):**
 ```json
 [
   {
-    "id": 1,
-    "titulo": "Olá querido amigo!",
-    "conteudo": "Espero que você esteja bem...",
-    "data_envio": "2025-09-22T10:30:00.000Z",
-    "lida": false,
-    "favoritada": false,
-    "remetente_username": "@amigo123",
-    "remetente_avatar": "url_avatar"
+    "userId": 2,
+    "username": "@amigo123",
+    "avatar": "url_avatar",
+    "cartinhas": [
+      {
+        "id": 1,
+        "titulo": "Olá querido amigo!",
+        "conteudo": "Espero que você esteja bem...",
+        "dataEnvio": "2023-09-22T10:30:00.000Z",
+        "lida": false,
+        "favoritada": false
+      },
+      {
+        "id": 3,
+        "titulo": "Novidades",
+        "conteudo": "Tenho novidades para contar...",
+        "dataEnvio": "2023-09-22T15:30:00.000Z",
+        "lida": true,
+        "favoritada": false
+      }
+    ]
+  },
+  {
+    "userId": 3,
+    "username": "@maria",
+    "avatar": "url_avatar",
+    "cartinhas": [
+      {
+        "id": 2,
+        "titulo": "Lembrete",
+        "conteudo": "Não esqueça nosso compromisso...",
+        "dataEnvio": "2023-09-21T08:00:00.000Z",
+        "lida": false,
+        "favoritada": false
+      }
+    ]
   }
 ]
 ```
@@ -369,9 +402,9 @@ Lista cartinhas marcadas como favoritas.
     "id": 2,
     "titulo": "Mensagem especial",
     "conteudo": "Esta é uma mensagem muito especial...",
-    "data_envio": "2025-09-22T09:00:00.000Z",
-    "data_lida": "2025-09-22T09:30:00.000Z",
-    "data_favoritada": "2025-09-22T09:35:00.000Z",
+    "data_envio": "2023-09-22T09:00:00.000Z",
+    "data_lida": "2023-09-22T09:30:00.000Z",
+    "data_favoritada": "2023-09-22T09:35:00.000Z",
     "remetente_username": "@amigoespecial",
     "remetente_avatar": "url_avatar"
   }
@@ -389,8 +422,8 @@ Busca detalhes de uma cartinha específica.
   "id": 1,
   "titulo": "Olá querido amigo!",
   "conteudo": "Espero que você esteja bem. Queria te dizer que...",
-  "data_envio": "2025-09-22T10:30:00.000Z",
-  "data_lida": "2025-09-22T11:00:00.000Z",
+  "data_envio": "2023-09-22T10:30:00.000Z",
+  "data_lida": "2023-09-22T11:00:00.000Z",
   "lida": true,
   "favoritada": false,
   "remetente_id": 2,
@@ -449,25 +482,31 @@ Marca uma cartinha como lida.
 
 ---
 
-#### **PUT** `/api/cartinhas/:cartinhaId/favoritar`
-Marca uma cartinha como favorita.
+#### **POST** `/api/cartinhas/:cartinhaId/toggle-favorito`
+Alterna o status favorito de uma cartinha (favorita ou desfavorita).
+
+**Observações:**
+- Endpoint único para favoritar e desfavoritar
+- Retorna o novo status após a alteração
 
 **Response (200):**
 ```json
 {
-  "message": "Cartinha favoritada com sucesso"
+  "message": "Cartinha favoritada com sucesso", 
+  "status": "success",
+  "favoritada": true,
+  "data_favoritada": "2023-09-22T14:30:00.000Z"
 }
 ```
 
----
+**OU**
 
-#### **DELETE** `/api/cartinhas/:cartinhaId/desfavoritar`
-Remove uma cartinha dos favoritos.
-
-**Response (200):**
 ```json
 {
-  "message": "Cartinha desfavoritada com sucesso"
+  "message": "Cartinha desfavoritada com sucesso", 
+  "status": "success",
+  "favoritada": false,
+  "data_favoritada": null
 }
 ```
 

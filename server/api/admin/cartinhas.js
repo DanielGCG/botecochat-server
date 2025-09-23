@@ -127,9 +127,6 @@ AdminCartinhasRouter.get('/usuarios', protect(1)(async (req, res) => {
         });
 
     } catch (err) {
-        console.error("==== ERRO SQL ====");
-        console.error(err);
-        console.error("=================");
         res.status(500).json({ message: "Erro ao carregar usuários e estatísticas" });
     }
 }));
@@ -163,7 +160,7 @@ AdminCartinhasRouter.get('/usuario/:userId', protect(1)(async (req, res) => {
 
         const whereClause = 'WHERE ' + whereConditions.join(' AND ');
 
-        // Buscar cartinhas
+        // Buscar cartinhas com LIMIT/OFFSET interpolados
         const [cartinhas] = await connection.execute(`
             SELECT 
                 c.id,
@@ -178,8 +175,8 @@ AdminCartinhasRouter.get('/usuario/:userId', protect(1)(async (req, res) => {
             JOIN users r ON c.remetente_id = r.id
             ${whereClause}
             ORDER BY c.data_envio DESC
-            LIMIT ? OFFSET ?
-        `, [...queryParams, limit, offset]);
+            LIMIT ${limit} OFFSET ${offset}
+        `, queryParams);
 
         // Contar total para paginação
         const [countResult] = await connection.execute(`
@@ -200,7 +197,7 @@ AdminCartinhasRouter.get('/usuario/:userId', protect(1)(async (req, res) => {
         });
 
     } catch (err) {
-        console.error(err);
+        console.error('[API] Erro ao carregar cartinhas do usuário:', err);
         res.status(500).json({ message: "Erro ao carregar cartinhas do usuário" });
     }
 }));

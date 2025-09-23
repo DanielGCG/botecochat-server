@@ -34,6 +34,9 @@ END;
 //
 DELIMITER ;
 
+-- Adicionar índice para buscas de usuário eficientes
+ALTER TABLE users ADD INDEX idx_username_search (username);
+
 -- ==========================
 -- TABELAS DE CHATS
 -- ==========================

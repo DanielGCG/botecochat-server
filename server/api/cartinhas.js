@@ -29,11 +29,12 @@ async function verifyCartinhaAccess(connection, cartinhaId, userId, userRole) {
 
 // ==================== Rotas ====================
 
-// GET /cartinhas/recebidas - Carregar cartinhas não lidas recebidas
+// GET /cartinhas/recebidas - Carregar cartinhas agrupadas por remetente
 CartinhasRouter.get('/recebidas', protect(0)(async (req, res) => {
     try {
         const connection = await pool.getConnection();
 
+        // Buscar todas as cartinhas recebidas do usuário, aplicando a regra de data para lidas
         const [cartinhas] = await connection.execute(
             `SELECT 
                 c.id,
@@ -42,20 +43,51 @@ CartinhasRouter.get('/recebidas', protect(0)(async (req, res) => {
                 c.data_envio,
                 c.lida,
                 c.favoritada,
+                r.id as remetente_id,
                 r.username as remetente_username,
                 r.profile_image as remetente_avatar
-             FROM cartinhas c
-             JOIN users r ON c.remetente_id = r.id
-             WHERE c.destinatario_id = ? AND c.lida = FALSE
-             ORDER BY c.data_envio DESC`,
+            FROM cartinhas c
+            JOIN users r ON c.remetente_id = r.id
+            WHERE c.destinatario_id = ?
+              AND (
+                  c.lida = FALSE
+                  OR (c.lida = TRUE AND c.data_envio >= NOW() - INTERVAL 3 DAY)
+              )
+            ORDER BY c.data_envio DESC`,
             [req.user.id]
         );
 
+        // Agrupar cartinhas por remetente
+        const cartinhasPorUsuario = cartinhas.reduce((acc, carta) => {
+            const remetenteId = carta.remetente_id;
+            if (!acc[remetenteId]) {
+                acc[remetenteId] = {
+                    userId: remetenteId,
+                    username: carta.remetente_username,
+                    avatar: carta.remetente_avatar,
+                    cartinhas: []
+                };
+            }
+            acc[remetenteId].cartinhas.push({
+                id: carta.id,
+                titulo: carta.titulo,
+                conteudo: carta.conteudo,
+                dataEnvio: carta.data_envio,
+                lida: carta.lida,
+                favoritada: carta.favoritada
+            });
+            return acc;
+        }, {});
+
+        const resultado = Object.values(cartinhasPorUsuario);
+
+        console.log(`[API] Cartinhas recebidas agrupadas: ${resultado.length} usuários`);
         connection.release();
-        res.json(cartinhas);
+
+        res.json(resultado);
 
     } catch (err) {
-        console.error(err);
+        console.error('[API] Erro ao carregar cartinhas recebidas:', err);
         res.status(500).json({ message: "Erro ao carregar cartinhas recebidas" });
     }
 }));
@@ -178,96 +210,6 @@ CartinhasRouter.put('/:cartinhaId/lida', protect(0)(async (req, res) => {
     }
 }));
 
-// PUT /cartinhas/:cartinhaId/favoritar - Favoritar uma cartinha
-CartinhasRouter.put('/:cartinhaId/favoritar', protect(0)(async (req, res) => {
-    const cartinhaId = req.params.cartinhaId;
-
-    try {
-        const connection = await pool.getConnection();
-
-        // Verifica se a cartinha existe e se o usuário é o destinatário
-        const [cartinha] = await connection.execute(
-            `SELECT destinatario_id, favoritada FROM cartinhas WHERE id = ?`,
-            [cartinhaId]
-        );
-
-        if (cartinha.length === 0) {
-            connection.release();
-            return res.status(404).json({ message: "Cartinha não encontrada" });
-        }
-
-        // Apenas o destinatário pode favoritar
-        if (cartinha[0].destinatario_id !== req.user.id) {
-            connection.release();
-            return res.status(403).json({ message: "Apenas o destinatário pode favoritar a cartinha" });
-        }
-
-        // Se já está favoritada, não faz nada
-        if (cartinha[0].favoritada) {
-            connection.release();
-            return res.json({ message: "Cartinha já estava favoritada" });
-        }
-
-        // Favorita (o trigger vai atualizar a data_favoritada automaticamente)
-        await connection.execute(
-            `UPDATE cartinhas SET favoritada = TRUE WHERE id = ?`,
-            [cartinhaId]
-        );
-
-        connection.release();
-        res.json({ message: "Cartinha favoritada com sucesso" });
-
-    } catch (err) {
-        console.error(err);
-        res.status(500).json({ message: "Erro ao favoritar cartinha" });
-    }
-}));
-
-// DELETE /cartinhas/:cartinhaId/desfavoritar - Desfavoritar uma cartinha
-CartinhasRouter.delete('/:cartinhaId/desfavoritar', protect(0)(async (req, res) => {
-    const cartinhaId = req.params.cartinhaId;
-
-    try {
-        const connection = await pool.getConnection();
-
-        // Verifica se a cartinha existe e se o usuário é o destinatário
-        const [cartinha] = await connection.execute(
-            `SELECT destinatario_id, favoritada FROM cartinhas WHERE id = ?`,
-            [cartinhaId]
-        );
-
-        if (cartinha.length === 0) {
-            connection.release();
-            return res.status(404).json({ message: "Cartinha não encontrada" });
-        }
-
-        // Apenas o destinatário pode desfavoritar
-        if (cartinha[0].destinatario_id !== req.user.id) {
-            connection.release();
-            return res.status(403).json({ message: "Apenas o destinatário pode desfavoritar a cartinha" });
-        }
-
-        // Se não está favoritada, não faz nada
-        if (!cartinha[0].favoritada) {
-            connection.release();
-            return res.json({ message: "Cartinha não estava favoritada" });
-        }
-
-        // Desfavorita (o trigger vai atualizar a data_favoritada automaticamente)
-        await connection.execute(
-            `UPDATE cartinhas SET favoritada = FALSE WHERE id = ?`,
-            [cartinhaId]
-        );
-
-        connection.release();
-        res.json({ message: "Cartinha desfavoritada com sucesso" });
-
-    } catch (err) {
-        console.error(err);
-        res.status(500).json({ message: "Erro ao desfavoritar cartinha" });
-    }
-}));
-
 // POST /cartinhas - Enviar uma nova cartinha
 CartinhasRouter.post('/', protect(0)(async (req, res) => {
     const { destinatario_username, titulo, conteudo } = req.body;
@@ -322,6 +264,65 @@ CartinhasRouter.post('/', protect(0)(async (req, res) => {
     } catch (err) {
         console.error(err);
         res.status(500).json({ message: "Erro ao enviar cartinha" });
+    }
+}));
+
+// POST /cartinhas/:cartinhaId/toggle-favorito - Alterna o status de favorito
+CartinhasRouter.post('/:cartinhaId/toggle-favorito', protect(0)(async (req, res) => {
+    const cartinhaId = req.params.cartinhaId;
+
+    try {
+        const connection = await pool.getConnection();
+
+        // Verifica se a cartinha existe e se o usuário é o destinatário
+        const [cartinha] = await connection.execute(
+            `SELECT destinatario_id, favoritada FROM cartinhas WHERE id = ?`,
+            [cartinhaId]
+        );
+
+        if (cartinha.length === 0) {
+            connection.release();
+            return res.status(404).json({ message: "Cartinha não encontrada" });
+        }
+
+        // Apenas o destinatário pode alternar o status de favorito
+        if (cartinha[0].destinatario_id !== req.user.id) {
+            connection.release();
+            return res.status(403).json({ message: "Apenas o destinatário pode favoritar/desfavoritar a cartinha" });
+        }
+
+        // Determina o novo status (inverte o valor atual)
+        const novoStatus = !cartinha[0].favoritada;
+
+        // Atualiza o status (o trigger vai cuidar da data_favoritada)
+        await connection.execute(
+            `UPDATE cartinhas SET favoritada = ? WHERE id = ?`,
+            [novoStatus, cartinhaId]
+        );
+
+        // Se favoritou, recupera a data para enviar ao frontend
+        let dataFavoritada = null;
+        if (novoStatus) {
+            const [updatedCartinha] = await connection.execute(
+                `SELECT data_favoritada FROM cartinhas WHERE id = ?`,
+                [cartinhaId]
+            );
+            dataFavoritada = updatedCartinha[0].data_favoritada;
+        }
+
+        connection.release();
+        
+        // Retorna o novo status e mensagem apropriada
+        res.json({ 
+            message: novoStatus ? "Cartinha favoritada com sucesso" : "Cartinha desfavoritada com sucesso", 
+            status: "success",
+            favoritada: novoStatus,
+            data_favoritada: dataFavoritada
+        });
+
+    } catch (err) {
+        console.error('[API] Erro ao alternar favorito da cartinha:', err);
+        res.status(500).json({ message: "Erro ao processar a operação" });
     }
 }));
 
