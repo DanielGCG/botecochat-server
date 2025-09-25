@@ -81,7 +81,6 @@ CartinhasRouter.get('/recebidas', protect(0)(async (req, res) => {
 
         const resultado = Object.values(cartinhasPorUsuario);
 
-        console.log(`[API] Cartinhas recebidas agrupadas: ${resultado.length} usuários`);
         connection.release();
 
         res.json(resultado);
@@ -323,6 +322,56 @@ CartinhasRouter.post('/:cartinhaId/toggle-favorito', protect(0)(async (req, res)
     } catch (err) {
         console.error('[API] Erro ao alternar favorito da cartinha:', err);
         res.status(500).json({ message: "Erro ao processar a operação" });
+    }
+}));
+
+// DELETE /cartinhas/:cartinhaId - Excluir uma cartinha
+CartinhasRouter.delete('/:cartinhaId', protect(0)(async (req, res) => {
+    const cartinhaId = req.params.cartinhaId;
+
+    try {
+        const connection = await pool.getConnection();
+
+        // Verifica se a cartinha existe e se o usuário é o remetente
+        const [cartinha] = await connection.execute(
+            `SELECT remetente_id, destinatario_id, lida FROM cartinhas WHERE id = ?`,
+            [cartinhaId]
+        );
+
+        if (cartinha.length === 0) {
+            connection.release();
+            return res.status(404).json({ message: "Cartinha não encontrada" });
+        }
+
+        // Somente o remetente pode excluir a cartinha, a menos que seja admin
+        if (cartinha[0].remetente_id !== req.user.id && req.user.role < 1) {
+            connection.release();
+            return res.status(403).json({ message: "Você não tem permissão para excluir esta cartinha" });
+        }
+
+        // Se a cartinha já foi lida, não pode ser excluída (a menos que seja admin)
+        if (cartinha[0].lida && req.user.role < 1) {
+            connection.release();
+            return res.status(400).json({ 
+                message: "Não é possível excluir cartinhas que já foram lidas pelo destinatário" 
+            });
+        }
+
+        // Exclui a cartinha
+        await connection.execute(
+            `DELETE FROM cartinhas WHERE id = ?`,
+            [cartinhaId]
+        );
+
+        connection.release();
+        res.json({ 
+            message: "Cartinha excluída com sucesso",
+            status: "success"
+        });
+
+    } catch (err) {
+        console.error('[API] Erro ao excluir cartinha:', err);
+        res.status(500).json({ message: "Erro ao excluir cartinha" });
     }
 }));
 

@@ -198,139 +198,53 @@ Atualiza senha do usuário logado.
 
 ---
 
-## 💬 Chats
+## 💬 Chats & DMs em Tempo Real
 
 Todas as rotas de chat requerem autenticação (nível 0 ou superior).
 
-#### **GET** `/api/chats`
-Lista todos os chats do usuário (DMs).
+### 🔔 Novidade: Suporte a Socket.IO para Chats e DMs
 
-**Response (200):**
-```json
-[
-  {
-    "id": 1,
-    "nome": null,
-    "tipo": "dm",
-    "participants": [
-      {
-        "id": 1,
-        "username": "@usuario1",
-        "isMine": true
-      },
-      {
-        "id": 2,
-        "username": "@usuario2",
-        "isMine": false
-      }
-    ],
-    "lastMessage": "Última mensagem...",
-    "lastMessageAt": "2025-09-22T10:30:00.000Z",
-    "unreadCount": 3
-  }
-]
+Agora, todas as conversas (públicas e DMs) funcionam em tempo real usando Socket.IO!
+
+#### Como funciona:
+- Cada chat (incluindo DMs) possui uma sala Socket.IO identificada por `chat_<chatId>`.
+- Ao entrar em um chat, o frontend deve emitir o evento `joinChat` com o `chatId`.
+- Ao enviar uma mensagem, o frontend deve emitir o evento `sendMessage` com `{ chatId, mensagem }`.
+- Todos os participantes do chat recebem o evento `newMessage` em tempo real.
+
+#### Eventos Socket.IO
+
+**Entrar em um chat (DM ou público):**
+```js
+socket.emit('joinChat', chatId);
 ```
 
----
-
-#### **GET** `/api/chats/users`
-Lista usuários disponíveis para criar DM.
-
-**Response (200):**
-```json
-[
-  {
-    "id": 2,
-    "username": "@usuario2"
-  },
-  {
-    "id": 3,
-    "username": "@usuario3"
-  }
-]
+**Enviar mensagem:**
+```js
+socket.emit('sendMessage', { chatId, mensagem: 'Olá!' });
 ```
 
----
-
-#### **POST** `/api/chats/dm`
-Cria uma nova DM com outro usuário.
-
-**Body:**
-```json
-{
-  "username": "@usuario2"
-}
+**Receber nova mensagem:**
+```js
+socket.on('newMessage', (msg) => {
+  // msg: { id, chatId, userId, text, username, createdAt, ... }
+});
 ```
 
-**Response Success (201):**
-```json
-{
-  "message": "DM criada",
-  "chatId": 5
-}
-```
+**Exemplo de fluxo para DMs:**
+1. O usuário entra na DM: `socket.emit('joinChat', chatIdDM)`
+2. Envia mensagem: `socket.emit('sendMessage', { chatId: chatIdDM, mensagem: 'Oi!' })`
+3. Recebe em tempo real: `socket.on('newMessage', ...)`
 
-**Response Existing (409):**
-```json
-{
-  "message": "DM já existe",
-  "chatId": 3
-}
-```
+#### Endpoints REST continuam disponíveis:
 
----
+- **GET** `/api/chats` — Lista todos os chats do usuário (inclui DMs)
+- **GET** `/api/chats/users` — Lista usuários disponíveis para criar DM
+- **POST** `/api/chats/dm` — Cria uma nova DM
+- **GET** `/api/chats/:chatId/messages` — Busca mensagens de um chat
+- **POST** `/api/chats/:chatId/messages` — Envia mensagem para um chat
 
-#### **GET** `/api/chats/:chatId/messages`
-Busca mensagens de um chat específico.
-
-**Query Parameters:**
-- `page` (optional): Página (padrão: 1)
-
-**Response (200):**
-```json
-{
-  "page": 1,
-  "messages": [
-    {
-      "id": 15,
-      "username": "@usuario2",
-      "mensagem": "Olá! Como você está?",
-      "isMine": false,
-      "createdAt": "2025-09-22T10:30:00.000Z"
-    },
-    {
-      "id": 16,
-      "username": "@usuario1",
-      "mensagem": "Oi! Estou bem, obrigado!",
-      "isMine": true,
-      "createdAt": "2025-09-22T10:35:00.000Z"
-    }
-  ]
-}
-```
-
----
-
-#### **POST** `/api/chats/:chatId/messages`
-Envia uma mensagem para um chat.
-
-**Body:**
-```json
-{
-  "mensagem": "Minha mensagem aqui!"
-}
-```
-
-**Response (200):**
-```json
-{
-  "id": 17,
-  "mensagem": "Minha mensagem aqui!",
-  "username": "@usuario1",
-  "isMine": true,
-  "createdAt": "2025-09-22T10:40:00.000Z"
-}
-```
+**Todos os chats e DMs podem ser usados tanto via REST quanto via Socket.IO para comunicação em tempo real.**
 
 ---
 
@@ -507,6 +421,39 @@ Alterna o status favorito de uma cartinha (favorita ou desfavorita).
   "status": "success",
   "favoritada": false,
   "data_favoritada": null
+}
+```
+
+---
+
+#### **DELETE** `/api/cartinhas/:cartinhaId`
+Exclui uma cartinha enviada pelo usuário.
+
+**Observações:**
+- Apenas o remetente pode excluir a cartinha
+- Administradores podem excluir qualquer cartinha
+- Cartinhas já lidas pelo destinatário não podem ser excluídas (exceto por administradores)
+
+**Response (200):**
+```json
+{
+  "message": "Cartinha excluída com sucesso",
+  "status": "success"
+}
+```
+
+**Response Error (403/400):**
+```json
+{
+  "message": "Você não tem permissão para excluir esta cartinha"
+}
+```
+
+**OU**
+
+```json
+{
+  "message": "Não é possível excluir cartinhas que já foram lidas pelo destinatário"
 }
 ```
 
