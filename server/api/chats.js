@@ -166,13 +166,8 @@ ChatsRouter.post('/:chatIdentifier/messages', protect(0)(async (req, res) => {
             [result.insertId]
         );
 
-        // Atualiza last_read_message_id do remetente
-        await connection.execute(
-            `INSERT INTO chat_reads (chat_id, user_id, last_read_message_id)
-             VALUES (?, ?, ?)
-             ON DUPLICATE KEY UPDATE last_read_message_id = ?`,
-            [chatId, req.user.id, rows[0].id, rows[0].id]
-        );
+        // REMOVIDO: Não marca automaticamente como lida pelo remetente
+        // O remetente só deve marcar como lida quando realmente visualizar
 
         connection.release();
 
@@ -238,9 +233,13 @@ ChatsRouter.get('/', protect(0)(async (req, res) => {
             // Contagem não lidas
             const [unreadRows] = await connection.execute(
                 `SELECT COUNT(*) AS unreadCount
-                 FROM chat_messages cm
-                 LEFT JOIN chat_reads cr ON cm.id = cr.last_read_message_id AND cr.user_id = ?
-                 WHERE cm.chat_id = ? AND (cr.last_read_message_id IS NULL OR cm.id > cr.last_read_message_id)`,
+                FROM chat_messages cm
+                WHERE cm.chat_id = ?
+                AND cm.id > COALESCE((
+                    SELECT last_read_message_id
+                    FROM chat_reads
+                    WHERE chat_id = ? AND user_id = ?
+                ), 0)`,
                 [req.user.id, chat.id]
             );
 
@@ -272,20 +271,15 @@ ChatsRouter.get('/users', protect(0)(async (req, res) => {
 
         const [users] = await connection.execute(
             `SELECT u.id, u.username
-             FROM users u
-             WHERE u.id != ?
-               AND NOT EXISTS (
-                   SELECT 1
-                   FROM chats c
-                   JOIN chat_participants cp ON c.id = cp.chat_id
-                   WHERE c.tipo = 'dm'
-                     AND cp.user_id = u.id
-                     AND c.id IN (
-                         SELECT chat_id
-                         FROM chat_participants
-                         WHERE user_id = ?
-                     )
-               )`,
+            FROM users u
+            WHERE u.id != ?
+            AND NOT EXISTS (
+                SELECT 1
+                FROM chats c
+                JOIN chat_participants cp1 ON c.id = cp1.chat_id AND cp1.user_id = u.id
+                JOIN chat_participants cp2 ON c.id = cp2.chat_id AND cp2.user_id = ?
+                WHERE c.tipo = 'dm'
+            )`,
             [userId, userId]
         );
 
@@ -366,23 +360,31 @@ async function verifyChatAccessSocket(connection, chatId, userId) {
 // Configura os eventos Socket.IO para chats
 function setupSocketHandlers(io) {
     io.on('connection', (socket) => {
-        console.log(`Usuário conectado: ${socket.id}, userId: ${socket.userId}`);
+        console.log(`✅ Usuário conectado: ${socket.username} (${socket.userId})`);
 
+        // Entrar em um chat
         socket.on('joinChat', async (chatId) => {
-            socket.join(`chat_${chatId}`);
-            console.log(`Usuário ${socket.userId} entrou na sala chat_${chatId}`);
-
             try {
                 const connection = await pool.getConnection();
+                
+                // Verificar se tem acesso ao chat
+                const hasAccess = await verifyChatAccessSocket(connection, chatId, socket.userId);
+                if (!hasAccess) {
+                    connection.release();
+                    return socket.emit('error', { message: 'Acesso negado ao chat' });
+                }
 
-                // Busca a última mensagem do chat para marcar como lida
+                // Entrar na sala
+                socket.join(`chat_${chatId}`);
+                console.log(`👥 ${socket.username} entrou no chat ${chatId}`);
+
+                // Marcar mensagens como lidas
                 const [lastMsg] = await connection.execute(
                     `SELECT id FROM chat_messages WHERE chat_id = ? ORDER BY created_at DESC LIMIT 1`,
                     [chatId]
                 );
 
                 if (lastMsg.length > 0) {
-                    // Atualiza last_read_message_id
                     await connection.execute(
                         `INSERT INTO chat_reads (chat_id, user_id, last_read_message_id)
                          VALUES (?, ?, ?)
@@ -390,7 +392,7 @@ function setupSocketHandlers(io) {
                         [chatId, socket.userId, lastMsg[0].id, lastMsg[0].id]
                     );
 
-                    // Notifica outros participantes sobre a leitura
+                    // Notificar outros participantes sobre a leitura
                     socket.to(`chat_${chatId}`).emit('updateLastRead', {
                         chatId: chatId,
                         userId: socket.userId,
@@ -399,30 +401,38 @@ function setupSocketHandlers(io) {
                 }
 
                 connection.release();
+                socket.emit('joinedChat', { chatId, success: true });
+
             } catch (err) {
-                console.error('Erro ao marcar mensagens como lidas:', err);
+                console.error('Erro ao entrar no chat:', err);
+                socket.emit('error', { message: 'Erro ao entrar no chat' });
             }
         });
 
+        // Enviar mensagem
         socket.on('sendMessage', async ({ chatId, mensagem }) => {
-            const userId = socket.userId;
-            if (!chatId || !mensagem) return;
+            if (!chatId || !mensagem || mensagem.trim() === '') {
+                return socket.emit('error', { message: 'Dados inválidos' });
+            }
 
             try {
                 const connection = await pool.getConnection();
 
-                const canAccess = await verifyChatAccessSocket(connection, chatId, userId);
-                if (!canAccess) {
+                // Verificar acesso
+                const hasAccess = await verifyChatAccessSocket(connection, chatId, socket.userId);
+                if (!hasAccess) {
                     connection.release();
-                    return socket.emit('errorMessage', 'Você não tem acesso a este chat');
+                    return socket.emit('error', { message: 'Acesso negado ao chat' });
                 }
 
+                // Inserir mensagem
                 const [result] = await connection.execute(
                     `INSERT INTO chat_messages (chat_id, user_id, mensagem) VALUES (?, ?, ?)`,
-                    [chatId, userId, mensagem]
+                    [chatId, socket.userId, mensagem.trim()]
                 );
 
-                const [rows] = await connection.execute(
+                // Buscar mensagem completa
+                const [msgRows] = await connection.execute(
                     `SELECT cm.id, cm.chat_id, cm.user_id, u.username, cm.mensagem, cm.created_at
                      FROM chat_messages cm
                      JOIN users u ON cm.user_id = u.id
@@ -430,63 +440,57 @@ function setupSocketHandlers(io) {
                     [result.insertId]
                 );
 
-                const msgData = {
-                    id: rows[0].id,
-                    chatId: rows[0].chat_id,
-                    userId: rows[0].user_id,
-                    text: rows[0].mensagem,
-                    username: rows[0].username,
-                    createdAt: rows[0].created_at,
-                    seen: true
-                };
-
-                await connection.execute(
-                    `INSERT INTO chat_reads (chat_id, user_id, last_read_message_id)
-                     VALUES (?, ?, ?)
-                     ON DUPLICATE KEY UPDATE last_read_message_id = ?`,
-                    [chatId, userId, msgData.id, msgData.id]
-                );
-
-                const [participants] = await connection.execute(
-                    `SELECT user_id FROM chat_participants WHERE chat_id = ? AND user_id != ?`,
-                    [chatId, userId]
-                );
-
-                for (const p of participants) {
-                    await connection.execute(
-                        `INSERT INTO chat_reads (chat_id, user_id, last_read_message_id)
-                         VALUES (?, ?, 0)
-                         ON DUPLICATE KEY UPDATE last_read_message_id = last_read_message_id`,
-                        [chatId, p.user_id]
-                    );
-                }
+                const message = msgRows[0];
+                
+                // REMOVIDO: Não marca automaticamente como lida pelo remetente
+                // O remetente só deve marcar como lida quando realmente visualizar
 
                 connection.release();
 
-                // Emite nova mensagem com estrutura que o frontend espera
+                // Estrutura da mensagem que o frontend espera
+                const messageData = {
+                    id: message.id,
+                    userId: message.user_id,
+                    username: message.username,
+                    text: message.mensagem,
+                    created_at: message.created_at,
+                    seen: false // Mensagem não é marcada como vista até ser visualizada
+                };
+
+                // Emitir no formato que o frontend espera
                 io.to(`chat_${chatId}`).emit('newMessage', {
                     chatId: chatId,
-                    message: msgData,  // Dados da mensagem dentro de 'message'
-                    lastMessage: msgData.text,
-                    lastMessageAt: msgData.createdAt,
-                    unreadCount: 1
+                    message: messageData,
+                    lastMessage: message.mensagem,
+                    lastMessageAt: message.created_at,
+                    unreadCount: 1 // Para outros usuários
                 });
 
-                // Emite evento de atualização de leitura para todos os participantes
-                io.to(`chat_${chatId}`).emit('updateLastRead', {
-                    chatId: chatId,
-                    userId: userId,
-                    lastReadMessageId: msgData.id
-                });
+                // REMOVIDO: Não emite evento de leitura automaticamente
+                // O evento de leitura só deve ser emitido quando realmente visualizar
+
+                console.log(`💬 Nova mensagem no chat ${chatId}: ${socket.username}`);
 
             } catch (err) {
-                console.error(err);
-                socket.emit('errorMessage', 'Erro ao enviar mensagem');
+                console.error('Erro ao enviar mensagem:', err);
+                socket.emit('error', { message: 'Erro ao enviar mensagem' });
             }
         });
 
-        socket.on('disconnect', () => {
-            console.log(`Usuário desconectado: ${socket.id}`);
+        // Sair do chat
+        socket.on('leaveChat', (chatId) => {
+            socket.leave(`chat_${chatId}`);
+            console.log(`👋 ${socket.username} saiu do chat ${chatId}`);
+        });
+
+        // Desconexão
+        socket.on('disconnect', (reason) => {
+            console.log(`❌ ${socket.username} desconectado: ${reason}`);
+        });
+
+        // Tratamento de erros
+        socket.on('error', (error) => {
+            console.error(`Erro no socket ${socket.username}:`, error);
         });
     });
 }

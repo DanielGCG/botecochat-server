@@ -10,10 +10,14 @@ const authMiddleware = (minRole = 0, refresh = true) => {
                 return next(); // Rota pública, segue em frente
             }
 
-            const cookieValue = req.cookies['session'];
+            const cookieValue = req.cookies && req.cookies['session'];
 
             if (!cookieValue) {
-                return res.status(401).json({ message: "Sessão não encontrada" });
+                if (res && res.status) {
+                    return res.status(401).json({ message: "Sessão não encontrada" });
+                } else {
+                    return next(new Error("Sessão não encontrada")); // Para Socket.IO
+                }
             }
 
             const connection = await pool.getConnection();
@@ -29,7 +33,11 @@ const authMiddleware = (minRole = 0, refresh = true) => {
 
             if (sessions.length === 0) {
                 connection.release();
-                return res.status(401).json({ message: "Sessão inválida ou expirada" });
+                if (res && res.status) {
+                    return res.status(401).json({ message: "Sessão inválida ou expirada" });
+                } else {
+                    return next(new Error("Sessão inválida ou expirada")); // Para Socket.IO
+                }
             }
 
             const session = sessions[0];
@@ -37,7 +45,11 @@ const authMiddleware = (minRole = 0, refresh = true) => {
             // Verifica role mínima
             if (session.role < minRole) {
                 connection.release();
-                return res.status(403).json({ message: "Acesso negado" });
+                if (res && res.status) {
+                    return res.status(403).json({ message: "Acesso negado" });
+                } else {
+                    return next(new Error("Acesso negado")); // Para Socket.IO
+                }
             }
 
             // Atualiza expires_at se refresh ativado
@@ -60,7 +72,11 @@ const authMiddleware = (minRole = 0, refresh = true) => {
             next();
         } catch (err) {
             console.error(err);
-            return res.status(500).json({ message: "Erro na autenticação" });
+            if (res && res.status) {
+                return res.status(500).json({ message: "Erro na autenticação" });
+            } else {
+                return next(new Error("Erro na autenticação")); // Para Socket.IO
+            }
         }
     };
 };

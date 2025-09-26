@@ -19,8 +19,8 @@ const sessionMiddleware = session({
     saveUninitialized: false,
     cookie: {
         httpOnly: true,
-        secure: true,
-        sameSite: 'none',
+        secure: process.env.NODE_ENV === 'production', // Só secure em produção
+        sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
         maxAge: 1000 * 60 * 60 * 24
     }
 });
@@ -62,14 +62,17 @@ const io = new Server(httpServer, {
 // Middleware helper para Socket.IO usar middlewares Express
 const wrap = middleware => (socket, next) => middleware(socket.request, {}, next);
 
-io.use(wrap(cookieParser()));        // lê cookies
-io.use(wrap(sessionMiddleware));     // lê sessão
-io.use(wrap(authMiddleware));        // popula req.user
+io.use(wrap(sessionMiddleware));     // Sessão primeiro
+io.use(wrap(cookieParser()));        // Cookies depois
+io.use(wrap(authMiddleware(0)));     // Auth com nivel minimo 0
 
 // Checa autenticação
 io.use((socket, next) => {
-    if (!socket.request.user) return next(new Error('Usuário não autenticado'));
+    if (!socket.request.user) {
+        return next(new Error('Usuário não autenticado'));
+    }
     socket.userId = socket.request.user.id;
+    socket.username = socket.request.user.username;
     next();
 });
 
