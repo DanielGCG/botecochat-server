@@ -1,6 +1,6 @@
 {
   "name": "botecochat-server",
-  "version": "1.0.0",
+  "version": "0.0.5",
   "main": "index.js",
   "scripts": {
     "dev": "nodemon --watch . --ext js,ejs,html,css app.js",

@@ -44,6 +44,47 @@ async function getUserIdByUsername(connection, username) {
     return rows[0].id;
 }
 
+// Marca mensagens como lidas até uma determinada mensagem (apenas mensagens de outros usuários)
+async function markMessagesAsRead(connection, chatId, userId, upToMessageId = null) {
+    try {
+        let lastMessageId = upToMessageId;
+        
+        // Se não foi especificado um ID, pega a última mensagem do chat que NÃO seja do próprio usuário
+        if (!lastMessageId) {
+            const [lastMsg] = await connection.execute(
+                `SELECT id FROM chat_messages 
+                 WHERE chat_id = ? AND user_id != ? 
+                 ORDER BY created_at DESC LIMIT 1`,
+                [chatId, userId]
+            );
+            if (lastMsg.length === 0) return null; // Não há mensagens de outros usuários
+            lastMessageId = lastMsg[0].id;
+        } else {
+            // Verifica se a mensagem especificada não é do próprio usuário
+            const [msgCheck] = await connection.execute(
+                `SELECT user_id FROM chat_messages WHERE id = ?`,
+                [lastMessageId]
+            );
+            if (msgCheck.length === 0 || msgCheck[0].user_id === userId) {
+                return null; // Não marca próprias mensagens como lidas
+            }
+        }
+
+        // Atualiza ou insere registro de leitura
+        await connection.execute(
+            `INSERT INTO chat_reads (chat_id, user_id, last_read_message_id)
+             VALUES (?, ?, ?)
+             ON DUPLICATE KEY UPDATE last_read_message_id = GREATEST(last_read_message_id, ?)`,
+            [chatId, userId, lastMessageId, lastMessageId]
+        );
+
+        return lastMessageId;
+    } catch (err) {
+        console.error('Erro ao marcar mensagens como lidas:', err);
+        return null;
+    }
+}
+
 // ==================== Endpoints de Mensagens ====================
 
 // GET /chats/:chatIdentifier/messages?page=1
@@ -79,26 +120,31 @@ ChatsRouter.get('/:chatIdentifier/messages', protect(0)(async (req, res) => {
             return res.status(403).json({ message: "Você não pode acessar este chat" });
         }
 
-        // Busca mensagens (LIMIT e OFFSET via template literal)
+        // Busca mensagens com informações de leitura
         const [messages] = await connection.execute(
-            `SELECT cm.id, cm.user_id, u.username, cm.mensagem, cm.created_at
+            `SELECT cm.id, cm.user_id, u.username, cm.mensagem, cm.created_at,
+                    CASE 
+                        WHEN cm.user_id = ? THEN (
+                            -- Verifica se outros participantes leram esta mensagem
+                            SELECT COUNT(*) > 0
+                            FROM chat_reads cr
+                            WHERE cr.chat_id = ? 
+                            AND cr.user_id != ? 
+                            AND cr.last_read_message_id >= cm.id
+                        )
+                        ELSE FALSE
+                    END as isReadByOthers
              FROM chat_messages cm
              JOIN users u ON cm.user_id = u.id
              WHERE cm.chat_id = ?
              ORDER BY cm.created_at ASC
              LIMIT ${limit} OFFSET ${offset}`,
-            [chatId]
+            [req.user.id, chatId, req.user.id, chatId]
         );
 
-        // Atualiza last_read_message_id para o usuário
+        // Marca mensagens como lidas automaticamente quando carrega a página
         if (messages.length > 0) {
-            const lastMessageId = messages[messages.length - 1].id;
-            await connection.execute(
-                `INSERT INTO chat_reads (chat_id, user_id, last_read_message_id)
-                 VALUES (?, ?, ?)
-                 ON DUPLICATE KEY UPDATE last_read_message_id = ?`,
-                [chatId, req.user.id, lastMessageId, lastMessageId]
-            );
+            await markMessagesAsRead(connection, chatId, req.user.id);
         }
 
         connection.release();
@@ -110,7 +156,8 @@ ChatsRouter.get('/:chatIdentifier/messages', protect(0)(async (req, res) => {
                 username: m.username,
                 mensagem: m.mensagem,
                 isMine: m.user_id === req.user.id,
-                createdAt: m.created_at
+                createdAt: m.created_at,
+                seen: m.user_id === req.user.id ? Boolean(m.isReadByOthers) : true // Minhas mensagens: se outros leram; Mensagens dos outros: sempre true (já estou vendo)
             }))
         });
 
@@ -230,17 +277,18 @@ ChatsRouter.get('/', protect(0)(async (req, res) => {
             const lastMessage = lastMsgRows[0]?.mensagem || null;
             const lastMessageAt = lastMsgRows[0]?.created_at || null;
 
-            // Contagem não lidas
+            // Contagem não lidas (apenas mensagens de outros usuários)
             const [unreadRows] = await connection.execute(
                 `SELECT COUNT(*) AS unreadCount
                 FROM chat_messages cm
                 WHERE cm.chat_id = ?
+                AND cm.user_id != ? 
                 AND cm.id > COALESCE((
                     SELECT last_read_message_id
                     FROM chat_reads
                     WHERE chat_id = ? AND user_id = ?
                 ), 0)`,
-                [req.user.id, chat.id]
+                [chat.id, req.user.id, chat.id, req.user.id]
             );
 
             chatList.push({
@@ -283,12 +331,59 @@ ChatsRouter.get('/users', protect(0)(async (req, res) => {
             [userId, userId]
         );
 
-        console.log('Usuários retornados:', users);
         connection.release();
         res.json(users);
     } catch (err) {
         console.error(err);
         res.status(500).json({ message: "Erro ao carregar usuários" });
+    }
+}));
+
+// POST /chats/:chatIdentifier/read - Marcar mensagens como lidas
+ChatsRouter.post('/:chatIdentifier/read', protect(0)(async (req, res) => {
+    const chatIdentifier = req.params.chatIdentifier;
+    const { messageId } = req.body; // Opcional: ID específico até onde marcar como lido
+
+    try {
+        const connection = await pool.getConnection();
+
+        // Obtém ID do chat
+        let chatId;
+        if (isNaN(chatIdentifier)) {
+            const [chatRows] = await connection.execute(`SELECT id FROM chats WHERE nome = ?`, [chatIdentifier]);
+            if (chatRows.length === 0) {
+                connection.release();
+                return res.status(404).json({ message: "Chat não encontrado" });
+            }
+            chatId = chatRows[0].id;
+        } else {
+            chatId = parseInt(chatIdentifier, 10);
+        }
+
+        // Verifica acesso
+        const canAccess = await verifyChatAccess(connection, chatId, req.user.id);
+        if (!canAccess) {
+            connection.release();
+            return res.status(403).json({ message: "Você não pode acessar este chat" });
+        }
+
+        // Marca mensagens como lidas
+        const lastReadMessageId = await markMessagesAsRead(connection, chatId, req.user.id, messageId);
+
+        connection.release();
+
+        if (lastReadMessageId) {
+            res.json({ 
+                message: "Mensagens marcadas como lidas",
+                lastReadMessageId 
+            });
+        } else {
+            res.status(404).json({ message: "Nenhuma mensagem encontrada" });
+        }
+
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: "Erro ao marcar mensagens como lidas" });
     }
 }));
 
@@ -327,7 +422,8 @@ ChatsRouter.post('/dm', protect(0)(async (req, res) => {
 
         // Cria novo chat DM
         const [result] = await connection.execute(
-            `INSERT INTO chats (tipo) VALUES ('dm')`
+            `INSERT INTO chats (tipo, criado_por) VALUES ('dm', ?)`,
+            [req.user.id]
         );
         const chatId = result.insertId;
 
@@ -360,7 +456,7 @@ async function verifyChatAccessSocket(connection, chatId, userId) {
 // Configura os eventos Socket.IO para chats
 function setupSocketHandlers(io) {
     io.on('connection', (socket) => {
-        console.log(`✅ Usuário conectado: ${socket.username} (${socket.userId})`);
+        console.log(`Usuário conectado: ${socket.username} (${socket.userId})`);
 
         // Entrar em um chat
         socket.on('joinChat', async (chatId) => {
@@ -376,27 +472,17 @@ function setupSocketHandlers(io) {
 
                 // Entrar na sala
                 socket.join(`chat_${chatId}`);
-                console.log(`👥 ${socket.username} entrou no chat ${chatId}`);
+                console.log(`${socket.username} entrou no chat ${chatId}`);
 
-                // Marcar mensagens como lidas
-                const [lastMsg] = await connection.execute(
-                    `SELECT id FROM chat_messages WHERE chat_id = ? ORDER BY created_at DESC LIMIT 1`,
-                    [chatId]
-                );
+                // Marcar mensagens como lidas usando a função auxiliar
+                const lastReadMessageId = await markMessagesAsRead(connection, chatId, socket.userId);
 
-                if (lastMsg.length > 0) {
-                    await connection.execute(
-                        `INSERT INTO chat_reads (chat_id, user_id, last_read_message_id)
-                         VALUES (?, ?, ?)
-                         ON DUPLICATE KEY UPDATE last_read_message_id = ?`,
-                        [chatId, socket.userId, lastMsg[0].id, lastMsg[0].id]
-                    );
-
+                if (lastReadMessageId) {
                     // Notificar outros participantes sobre a leitura
                     socket.to(`chat_${chatId}`).emit('updateLastRead', {
                         chatId: chatId,
                         userId: socket.userId,
-                        lastReadMessageId: lastMsg[0].id
+                        lastReadMessageId: lastReadMessageId
                     });
                 }
 
@@ -469,7 +555,7 @@ function setupSocketHandlers(io) {
                 // REMOVIDO: Não emite evento de leitura automaticamente
                 // O evento de leitura só deve ser emitido quando realmente visualizar
 
-                console.log(`💬 Nova mensagem no chat ${chatId}: ${socket.username}`);
+                console.log(`Nova mensagem no chat ${chatId}: ${socket.username}`);
 
             } catch (err) {
                 console.error('Erro ao enviar mensagem:', err);
@@ -480,12 +566,12 @@ function setupSocketHandlers(io) {
         // Sair do chat
         socket.on('leaveChat', (chatId) => {
             socket.leave(`chat_${chatId}`);
-            console.log(`👋 ${socket.username} saiu do chat ${chatId}`);
+            console.log(`${socket.username} saiu do chat ${chatId}`);
         });
 
         // Desconexão
         socket.on('disconnect', (reason) => {
-            console.log(`❌ ${socket.username} desconectado: ${reason}`);
+            console.log(`${socket.username} desconectado: ${reason}`);
         });
 
         // Tratamento de erros
